@@ -12,8 +12,6 @@ services:
       - DATABASE_URL=sqlite:///./sceap.db
     volumes:
       - ./backend:/app
-    depends_on:
-      - frontend
 
   frontend:
     build:
@@ -27,3 +25,5 @@ services:
     environment:
       - VITE_HOST=0.0.0.0
     command: ["npm", "run", "dev"]
+    depends_on:
+      - backend
