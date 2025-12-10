@@ -422,6 +422,30 @@ async def get_project_cables(project_id: str):
     finally:
         db.close()
 
+
+@app.post('/api/v1/project/{project_id}/cable/{cable_id}/approve')
+async def approve_cable(project_id: str, cable_id: str, status: str = 'approved'):
+    """Update cable approval status in DB."""
+    if not DB_AVAILABLE:
+        return { 'status': status, 'cable_id': cable_id, 'project_id': project_id }
+
+    db = SessionLocal()
+    try:
+        row = db.query(CableResultModel).filter(
+            CableResultModel.project_id == project_id,
+            CableResultModel.result_id == cable_id
+        ).first()
+        if row and row.payload:
+            row.payload['status'] = status
+            db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+    return { 'status': status, 'cable_id': cable_id }
+
+
 @app.post("/api/v1/routing/auto", response_model=RoutingResult)
 async def auto_route_cable(request: Dict[str, Any]):
     """Auto-route cable. Accepts simple payloads: {source, target, cable_id?} or full RoutingRequest fields."""
