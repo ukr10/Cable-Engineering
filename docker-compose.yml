@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: sceap-backend:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./sceap.db
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - frontend
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: sceap-frontend:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+    environment:
+      - VITE_HOST=0.0.0.0
+    command: ["npm", "run", "dev"]
