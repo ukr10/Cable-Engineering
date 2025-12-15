@@ -181,10 +181,43 @@ const CableSizing: React.FC = () => {
         }
       })
 
-      if (response.data.results && response.data.results.length > 0) {
+      if (response.data.inputs && response.data.inputs.length > 0) {
+        // map backend inputs to frontend shape
+        const mapped = response.data.inputs.map((b:any, idx:number) => ({
+          id: b.cable_number || b.cableNumber || `import-${idx}`,
+          cableNumber: b.cable_number || b.cableNumber || `CB-${idx+1}`,
+          description: b.description || '',
+          loadKw: Number(b.load_kw ?? b.loadKw ?? 0),
+          loadKva: Number(b.load_kva ?? b.loadKva ?? 0),
+          voltage: Number(b.voltage ?? 415),
+          pf: Number(b.pf ?? 0.9),
+          efficiency: Number(b.efficiency ?? 0.95),
+          length: Number(b.length ?? 0),
+          runs: Number(b.runs ?? 1),
+          cableType: b.cable_type || b.cableType || 'C',
+          fromEquipment: b.from_equipment || b.fromEquipment || '',
+          toEquipment: b.to_equipment || b.toEquipment || '',
+          breakerType: b.breaker_type || b.breakerType || undefined,
+          feederType: b.feeder_type || b.feederType || undefined,
+          quantity: Number(b.quantity ?? 1),
+          voltageVariation: Number(b.voltage_variation ?? b.voltageVariation ?? 0) || 0,
+          powerSupply: b.power_supply || b.powerSupply || '',
+          installation: b.installation || '',
+          cores: Number(b.cores ?? 3),
+          prospectiveSc: b.prospective_sc ?? null,
+          phaseType: (b.phase_type || b.phaseType || 'three'),
+          ambientTemp: b.ambient_temp ?? b.ambientTemp ?? null,
+        }))
+        setCables(mapped)
+        setResults([])
+        setActiveTab('input')
+        // select all by default so user can quickly calculate
+        setSelectedCables(new Set(mapped.map(m => m.id)))
+        alert(`✅ Imported ${mapped.length} cables into input data`)
+      } else if (response.data.results && response.data.results.length > 0) {
         setResults(response.data.results)
         setActiveTab('results')
-        alert(`✅ Imported ${response.data.cables_imported} cables`)
+        alert(`✅ Imported ${response.data.cables_imported} cables (results available)`)
       }
       if (response.data.errors && response.data.errors.length > 0) {
         alert(`⚠️ Errors: ${response.data.errors.join(', ')}`)
@@ -204,7 +237,7 @@ const CableSizing: React.FC = () => {
   const handleCalculate = async () => {
     setLoading(true)
     try {
-      const q = selectedCatalog ? `?catalog_name=${encodeURIComponent(selectedCatalog)}` : ''
+      const q = selectedCatalog ? `?catalog_name=${encodeURIComponent(selectedCatalog)}&standard=${encodeURIComponent(standard)}` : `?standard=${encodeURIComponent(standard)}`
       const response = await axios.post(`/api/v1/cable/bulk${q}`, cables.map(c => ({
         cable_number: c.cableNumber,
         description: c.description,
@@ -315,19 +348,22 @@ const CableSizing: React.FC = () => {
       return
     }
 
-    const wsData = selected.map(r => ({
-      cable_number: r.cable_number,
-      flc: r.flc,
-      derated_current: r.derated_current,
-      selected_size: r.selected_size,
-      voltage_drop: r.voltage_drop,
-      sc_check: r.sc_check ? 'PASS' : 'FAIL',
-      ampacity: r.ampacity ?? '',
-      vd_pass: r.vd_pass ? 'PASS' : 'FAIL',
-      prospective_sc: r.prospective_sc ?? '',
-      ao: r.ao ? 'AO' : 'AN',
-      status: r.status,
-    }))
+    const wsData = selected.map(r => {
+      const obj:any = {}
+      if (visibleColumns.includes('cable_number')) obj['Cable'] = r.cable_number
+      if (visibleColumns.includes('flc')) obj['FLC_A'] = r.flc
+      if (visibleColumns.includes('derated_current')) obj['Derated_A'] = r.derated_current
+      if (visibleColumns.includes('selected_size')) obj['Selected_Size_mm2'] = r.selected_size
+      if (visibleColumns.includes('voltage_drop')) obj['V_drop_pct'] = r.voltage_drop
+      if (visibleColumns.includes('sc_check')) obj['SC_Check'] = r.sc_check ? 'PASS' : 'FAIL'
+      if (visibleColumns.includes('ampacity')) obj['Ampacity_A'] = r.ampacity ?? ''
+      if (visibleColumns.includes('vd_pass')) obj['VD_Pass'] = r.vd_pass ? 'PASS' : 'FAIL'
+      if (visibleColumns.includes('prospective_sc')) obj['Prospective_SC_A'] = r.prospective_sc ?? ''
+      if (visibleColumns.includes('ao')) obj['AO_AN'] = r.ao ? 'AO' : 'AN'
+      obj['Status'] = r.status
+      obj['Standard'] = standard
+      return obj
+    })
 
     const ws = XLSX.utils.json_to_sheet(wsData)
     const wb = XLSX.utils.book_new()
@@ -531,10 +567,17 @@ const CableSizing: React.FC = () => {
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   disabled={loading}
-                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 transition-colors disabled:opacity-50"
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 transition-colors disabled:opacity-50"
                 >
                   <Upload className="w-4 h-4" />
                   <span>{loading ? `Uploading ${uploadProgress}%` : 'Excel'}</span>
+                </button>
+                <button
+                  onClick={async () => { window.location.href = '/api/v1/import/template' }}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800/30 text-gray-300 hover:bg-slate-800/40"
+                >
+                  <Download className="w-4 h-4" />
+                  Template
                 </button>
               </div>
             </div>
@@ -553,11 +596,21 @@ const CableSizing: React.FC = () => {
                       setCatalogs(prev => [ ...(prev || []), resp.data.name ])
                       setSelectedCatalog(resp.data.name)
                       alert('Catalog uploaded: ' + resp.data.name)
+                    } else if (resp.data && resp.data.errors) {
+                      const msg = resp.data.errors.join(', ')
+                      if (resp.data.template_download) {
+                        if (confirm(msg + '\n\nWould you like to download the catalog template?')) {
+                          window.location.href = resp.data.template_download
+                        }
+                      } else {
+                        alert('Catalog upload failed: ' + msg)
+                      }
                     }
                   } catch (err:any) { alert('Catalog upload failed: ' + err.message) }
                   finally { setLoadingCatalog(false); if (catalogFileRef.current) catalogFileRef.current.value = '' }
                 }} />
                 <button onClick={() => catalogFileRef.current?.click()} className="px-4 py-2 rounded-lg bg-slate-800/30 text-gray-300 hover:bg-slate-800/40">{loadingCatalog ? 'Uploading...' : 'Upload Catalog'}</button>
+                <button onClick={() => { window.location.href = '/api/v1/catalogs/template' }} className="px-3 py-2 rounded-lg bg-slate-800/30 text-gray-300 hover:bg-slate-800/40">Download Template</button>
                 <select value={selectedCatalog || ''} onChange={(e) => setSelectedCatalog(e.target.value)} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white">
                   {catalogs.map(c => <option key={c} value={c}>{c}</option>)}
                   <option value="default">Default IEC</option>
@@ -611,6 +664,15 @@ const CableSizing: React.FC = () => {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-gray-600">
+                    <th className="text-left py-3 px-4 text-gray-400 font-medium">
+                      <input type="checkbox" onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedCables(new Set(cables.map(c => c.id)))
+                        } else {
+                          setSelectedCables(new Set())
+                        }
+                      }} className="rounded" />
+                    </th>
                     <th className="text-left py-3 px-4 text-gray-400 font-medium">Cable No.</th>
                     <th className="text-left py-3 px-4 text-gray-400 font-medium">Description</th>
                     <th className="text-left py-3 px-4 text-gray-400 font-medium">kW</th>
@@ -627,6 +689,9 @@ const CableSizing: React.FC = () => {
                 <tbody>
                   {cables.map((cable) => (
                     <tr key={cable.id} className="border-b border-gray-700 hover:bg-cyan-500/10">
+                      <td className="py-3 px-4">
+                        <input type="checkbox" checked={selectedCables.has(cable.id)} onChange={() => toggleSelection(cable.id)} className="rounded" />
+                      </td>
                       <td className="py-3 px-4 text-gray-300">{cable.cableNumber}</td>
                       <td className="py-3 px-4 text-gray-400">{cable.description}</td>
                       <td className="py-3 px-4 text-gray-300">{cable.loadKw}</td>
@@ -654,7 +719,7 @@ const CableSizing: React.FC = () => {
                             try {
                               setLoading(true)
                               const q = selectedCatalog ? `?catalog_name=${encodeURIComponent(selectedCatalog)}` : ''
-                              const resp = await axios.post(`/api/v1/cable/single${q}`, {
+                              const resp = await axios.post(`/api/v1/cable/single${q}${q ? '&' : '?'}standard=${encodeURIComponent(standard)}`, {
                                 cable_number: cable.cableNumber,
                                 description: cable.description,
                                 load_kw: cable.loadKw,
@@ -712,14 +777,64 @@ const CableSizing: React.FC = () => {
               </table>
             </div>
 
-            <button
-              onClick={handleCalculate}
+              <div className="flex gap-3">
+                <button
+                  onClick={() => {
+                    // Calculate selected inputs only
+                    (async () => {
+                      const selected = cables.filter(c => selectedCables.has(c.id))
+                      if (selected.length === 0) return alert('No cables selected')
+                      setLoading(true)
+                      try {
+                        const q = selectedCatalog ? `?catalog_name=${encodeURIComponent(selectedCatalog)}&standard=${encodeURIComponent(standard)}` : `?standard=${encodeURIComponent(standard)}`
+                        const payload = selected.map(c => ({
+                          cable_number: c.cableNumber,
+                          description: c.description,
+                          load_kw: c.loadKw,
+                          load_kva: c.loadKva,
+                          voltage: c.voltage,
+                          pf: c.pf,
+                          efficiency: c.efficiency,
+                          length: c.length,
+                          runs: c.runs,
+                          cable_type: c.cableType,
+                          from_equipment: c.fromEquipment,
+                          to_equipment: c.toEquipment,
+                          breaker_type: c.breakerType,
+                          feeder_type: c.feederType,
+                          quantity: c.quantity,
+                          voltage_variation: c.voltageVariation,
+                          power_supply: c.powerSupply,
+                          installation: c.installation,
+                          cores: c.cores,
+                          prospective_sc: c.prospectiveSc,
+                          phase_type: c.phaseType,
+                          ambient_temp: c.ambientTemp,
+                        }))
+                        const resp = await axios.post(`/api/v1/cable/bulk${q}`, payload)
+                        setResults(resp.data)
+                        setActiveTab('results')
+                      } catch (err:any) {
+                        alert('Calculation failed: ' + (err?.response?.data?.detail || err?.message || err))
+                      } finally { setLoading(false) }
+                    })()
+                  }}
+                  disabled={loading}
+                  className="px-6 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 text-white font-semibold hover:from-cyan-600 hover:to-blue-600 transition-all disabled:opacity-50"
+                >
+                  <Zap className="w-5 h-5" />
+                  {loading ? 'Calculating...' : 'Calculate Selected'}
+                </button>
+
+                <button
+                  onClick={handleCalculate}
               disabled={loading}
               className="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 text-white font-semibold hover:from-cyan-600 hover:to-blue-600 transition-all disabled:opacity-50"
             >
               <Zap className="w-5 h-5" />
               {loading ? 'Calculating...' : 'Calculate Cables'}
             </button>
+              </div>
           </div>
         </div>
       )}
@@ -852,14 +967,17 @@ const CableSizing: React.FC = () => {
                       {visibleColumns.includes('selected_size') && (
                         <td
                           className="py-3 px-4 text-cyan-400 font-semibold cursor-pointer hover:text-cyan-300"
-                          onClick={() => setSelectedVisualization({
-                            cableId: result.id,
-                            cores: result.cores,
-                            size: result.selected_size,
-                            od: result.od,
-                            fromEquipment: '',
-                            toEquipment: '',
-                          })}
+                          onClick={() => {
+                            const input = cables.find(c => c.id === result.id || c.cableNumber === result.cable_number)
+                            setSelectedVisualization({
+                              cableId: result.id,
+                              cores: result.cores,
+                              size: result.selected_size,
+                              od: result.od,
+                              fromEquipment: input ? input.fromEquipment : '',
+                              toEquipment: input ? input.toEquipment : '',
+                            })
+                          }}
                         >
                           {result.selected_size} mm²
                         </td>
@@ -1007,29 +1125,89 @@ const CableSizing: React.FC = () => {
               <button onClick={() => { setShowEditInputModal(false); setEditCable(null) }} className="p-1 text-slate-300 hover:text-white"><X size={18} /></button>
             </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <input value={editCable.description} onChange={(e) => setEditCable({ ...editCable, description: e.target.value })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Description" />
-              <input type="number" value={editCable.loadKw} onChange={(e) => setEditCable({ ...editCable, loadKw: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Load kW" />
-              <input type="number" value={editCable.loadKva} onChange={(e) => setEditCable({ ...editCable, loadKva: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Load kVA" />
-              <input type="number" value={editCable.voltage} onChange={(e) => setEditCable({ ...editCable, voltage: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Voltage" />
-              <input type="number" value={editCable.pf} step="0.01" onChange={(e) => setEditCable({ ...editCable, pf: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="PF" />
-              <input type="number" value={editCable.efficiency} step="0.01" onChange={(e) => setEditCable({ ...editCable, efficiency: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Efficiency" />
-              <input type="number" value={editCable.length} onChange={(e) => setEditCable({ ...editCable, length: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Length" />
-              <input type="number" value={editCable.runs} onChange={(e) => setEditCable({ ...editCable, runs: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Runs" />
-              <select value={editCable.phaseType || 'three'} onChange={(e) => setEditCable({ ...editCable, phaseType: e.target.value as any })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white">
-                <option value="three">3-Phase</option>
-                <option value="single">1-Phase</option>
-              </select>
-              <input type="number" value={editCable.prospectiveSc || 0} onChange={(e) => setEditCable({ ...editCable, prospectiveSc: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Prospective SC (A)" />
-              <input type="number" value={editCable.ambientTemp || 0} onChange={(e) => setEditCable({ ...editCable, ambientTemp: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Ambient Temp (°C)" />
-              <input value={editCable.fromEquipment} onChange={(e) => setEditCable({ ...editCable, fromEquipment: e.target.value })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="From Equipment" />
-              <input value={editCable.toEquipment} onChange={(e) => setEditCable({ ...editCable, toEquipment: e.target.value })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="To Equipment" />
-              <input value={editCable.breakerType} onChange={(e) => setEditCable({ ...editCable, breakerType: e.target.value })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Breaker" />
-              <input value={editCable.feederType} onChange={(e) => setEditCable({ ...editCable, feederType: e.target.value })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Feeder Type" />
-              <input type="number" value={editCable.quantity} onChange={(e) => setEditCable({ ...editCable, quantity: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Quantity" />
-              <input type="number" value={editCable.voltageVariation || 0} onChange={(e) => setEditCable({ ...editCable, voltageVariation: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Voltage Variation (%)" />
-              <input value={editCable.powerSupply || ''} onChange={(e) => setEditCable({ ...editCable, powerSupply: e.target.value })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Power Supply" />
-              <input value={editCable.installation || ''} onChange={(e) => setEditCable({ ...editCable, installation: e.target.value })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Installation" />
-              <input type="number" value={editCable.cores || 0} onChange={(e) => setEditCable({ ...editCable, cores: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Cores" />
+              <div>
+                <label className="text-sm text-gray-400">Description</label>
+                <input value={editCable.description} onChange={(e) => setEditCable({ ...editCable, description: e.target.value })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="e.g. Main feeder to Panel" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Load (kW)</label>
+                <input type="number" value={editCable.loadKw} onChange={(e) => setEditCable({ ...editCable, loadKw: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="kW" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Load (kVA)</label>
+                <input type="number" value={editCable.loadKva} onChange={(e) => setEditCable({ ...editCable, loadKva: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="kVA" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Voltage (V)</label>
+                <input type="number" value={editCable.voltage} onChange={(e) => setEditCable({ ...editCable, voltage: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="415" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Power Factor</label>
+                <input type="number" value={editCable.pf} step="0.01" onChange={(e) => setEditCable({ ...editCable, pf: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="0.9" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Efficiency</label>
+                <input type="number" value={editCable.efficiency} step="0.01" onChange={(e) => setEditCable({ ...editCable, efficiency: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="0.95" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Length (m)</label>
+                <input type="number" value={editCable.length} onChange={(e) => setEditCable({ ...editCable, length: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Length in meters" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Runs</label>
+                <input type="number" value={editCable.runs} onChange={(e) => setEditCable({ ...editCable, runs: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Number of runs" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Phase Type</label>
+                <select value={editCable.phaseType || 'three'} onChange={(e) => setEditCable({ ...editCable, phaseType: e.target.value as any })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white">
+                  <option value="three">3-Phase</option>
+                  <option value="single">1-Phase</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Prospective SC (A)</label>
+                <input type="number" value={editCable.prospectiveSc || 0} onChange={(e) => setEditCable({ ...editCable, prospectiveSc: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Prospective short circuit (A)" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Ambient Temp (°C)</label>
+                <input type="number" value={editCable.ambientTemp || 0} onChange={(e) => setEditCable({ ...editCable, ambientTemp: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Ambient temperature" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">From Equipment</label>
+                <input value={editCable.fromEquipment} onChange={(e) => setEditCable({ ...editCable, fromEquipment: e.target.value })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="From" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">To Equipment</label>
+                <input value={editCable.toEquipment} onChange={(e) => setEditCable({ ...editCable, toEquipment: e.target.value })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="To" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Breaker Type</label>
+                <input value={editCable.breakerType} onChange={(e) => setEditCable({ ...editCable, breakerType: e.target.value })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Breaker" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Feeder Type</label>
+                <input value={editCable.feederType} onChange={(e) => setEditCable({ ...editCable, feederType: e.target.value })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Feeder Type" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Quantity</label>
+                <input type="number" value={editCable.quantity} onChange={(e) => setEditCable({ ...editCable, quantity: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Quantity" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Voltage Variation (%)</label>
+                <input type="number" value={editCable.voltageVariation || 0} onChange={(e) => setEditCable({ ...editCable, voltageVariation: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="%" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Power Supply</label>
+                <input value={editCable.powerSupply || ''} onChange={(e) => setEditCable({ ...editCable, powerSupply: e.target.value })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Power supply" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Installation</label>
+                <input value={editCable.installation || ''} onChange={(e) => setEditCable({ ...editCable, installation: e.target.value })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Installation type" />
+              </div>
+              <div>
+                <label className="text-sm text-gray-400">Cores</label>
+                <input type="number" value={editCable.cores || 0} onChange={(e) => setEditCable({ ...editCable, cores: Number(e.target.value) })} className="mt-1 px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" placeholder="Cores" />
+              </div>
             </div>
             <div className="flex justify-end gap-3 mt-4">
               <button className="px-4 py-2 bg-slate-700 text-white rounded" onClick={() => { setShowEditInputModal(false); setEditCable(null) }}>Cancel</button>

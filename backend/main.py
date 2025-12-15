@@ -21,6 +21,7 @@ except Exception:
 # Excel handling
 try:
     from openpyxl import load_workbook
+    from openpyxl import Workbook
 except ImportError:
     load_workbook = None
 
@@ -94,12 +95,15 @@ class CableResult(BaseModel):
     ao: Optional[bool] = None
     resistance_per_m: Optional[float] = None
     prospective_sc: Optional[float] = None
+    standard: Optional[str] = None
 
 class ExcelUploadResponse(BaseModel):
     success: bool
     cables_imported: int
     errors: List[str] = []
     results: List[CableResult] = []
+    inputs: Optional[List[Dict[str, Any]]] = None
+from fastapi.responses import StreamingResponse
 
 class RoutingRequest(BaseModel):
     cable_id: str
@@ -379,6 +383,11 @@ def parse_catalog_excel(file_content: bytes) -> Tuple[List[Dict[str, Any]], List
     try:
         workbook = load_workbook(io.BytesIO(file_content))
         sheet = workbook.active
+        # Validate header row
+        header_row = [str(cell).strip().lower().replace(' ', '_') for cell in next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
+        if not any(h in header_row for h in ('size_mm2', 'size', 'ampacity')):
+            errors.append('Missing header: expected columns `size_mm2` and `ampacity` (first row).')
+            return catalog, errors
         # Expect headers like: size_mm2, ampacity
         for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
             try:
@@ -678,7 +687,7 @@ async def root():
     return {"message": "SCEAP API Running", "version": "1.0.0", "db_usable": DB_USABLE}
 
 @app.post("/api/v1/cable/single")
-async def calculate_single_cable(cable: CableInput, catalog_name: Optional[str] = None) -> CableResult:
+async def calculate_single_cable(cable: CableInput, catalog_name: Optional[str] = None, standard: Optional[str] = 'IEC') -> CableResult:
     """Calculate single cable"""
     try:
         # Use phase-based FLC and refine derating factors
@@ -687,14 +696,24 @@ async def calculate_single_cable(cable: CableInput, catalog_name: Optional[str] 
         grouping = derive_grouping_factor(cable.runs or 1, cable.feeder_type, phase)
         temp_factor = derive_temp_factor(cable.ambient_temp)
         installation_factor = 1.0
+        # Apply standard-specific adjustments
+        if standard and standard.lower().startswith('is'):
+            # IS often applies slightly stricter derating defaults
+            grouping = max(0.55, grouping * 0.95)
+            temp_factor = round(max(0.85, temp_factor * 0.95), 3)
         derated = apply_derating(flc, grouping_factor=grouping, temp_factor=temp_factor, installation_factor=installation_factor)
         selected_size_str, size_value, ampacity, resistance_per_m = select_cable_size(derated, catalog_name=catalog_name)
         vdrop = calculate_voltage_drop(flc, cable.length, cable.voltage, resistance=resistance_per_m, size_mm2=size_value, runs=cable.runs)
         od = calculate_cable_od(3, size_value)
         
+        # Voltage drop limits per standard
         vd_limit = 5.0
-        if cable.voltage and cable.voltage > 1000:
-            vd_limit = 3.0
+        if standard and standard.lower().startswith('is'):
+            # IS 1554 often uses stricter limits for underground/overhead; use 3% for high-voltage
+            vd_limit = 3.0 if (cable.voltage and cable.voltage > 1000) else 5.0
+        else:
+            if cable.voltage and cable.voltage > 1000:
+                vd_limit = 3.0
 
         vd_pass = (vdrop <= vd_limit)
         # Short-circuit check: if user supplied prospective_sc, verify adiabatic capacity
@@ -738,17 +757,18 @@ async def calculate_single_cable(cable: CableInput, catalog_name: Optional[str] 
             ,
             ao=ao
             ,
-            prospective_sc=cable.prospective_sc
+            prospective_sc=cable.prospective_sc,
+            standard=standard
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/v1/cable/bulk")
-async def calculate_bulk_cables(cables: List[CableInput], catalog_name: Optional[str] = None) -> List[CableResult]:
+async def calculate_bulk_cables(cables: List[CableInput], catalog_name: Optional[str] = None, standard: Optional[str] = 'IEC') -> List[CableResult]:
     """Calculate multiple cables"""
     results = []
     for cable in cables:
-        result = await calculate_single_cable(cable, catalog_name=catalog_name)
+        result = await calculate_single_cable(cable, catalog_name=catalog_name, standard=standard)
         results.append(result)
     return results
 
@@ -758,6 +778,7 @@ async def upload_cable_excel(file: UploadFile = File(...), catalog_name: Optiona
     try:
         content = await file.read()
         cables, errors = parse_excel_cables(content)
+        inputs_serialized = [c.dict() for c in cables]
         
         results = []
         for cable in cables:
@@ -771,7 +792,8 @@ async def upload_cable_excel(file: UploadFile = File(...), catalog_name: Optiona
             success=len(errors) == 0,
             cables_imported=len(results),
             errors=errors,
-            results=results
+            results=results,
+            inputs=inputs_serialized
         )
     except Exception as e:
         return ExcelUploadResponse(success=False, cables_imported=0, errors=[str(e)])
@@ -818,7 +840,7 @@ async def upload_catalog(file: UploadFile = File(...), name: Optional[str] = Non
         content = await file.read()
         catalog, errors = parse_catalog_excel(content)
         if errors:
-            return { 'success': False, 'errors': errors }
+            return { 'success': False, 'errors': errors, 'template_download': '/api/v1/catalogs/template' }
         if not name:
             name = f"catalog-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
         if DB_USABLE:
@@ -871,6 +893,46 @@ async def list_catalogs():
     else:
         names = list(CATALOG_STORE.keys())
     return { 'catalogs': names }
+
+
+@app.get('/api/v1/catalogs/template')
+async def download_catalog_template():
+    """Return a small XLSX template for catalog upload with headers and example rows."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(['size_mm2', 'ampacity'])
+    ws.append([10, 55])
+    ws.append([16, 70])
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    headers = {
+        'Content-Disposition': 'attachment; filename="catalog-template.xlsx"'
+    }
+    return StreamingResponse(bio, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
+
+
+@app.get('/api/v1/import/template')
+async def download_import_template():
+    """Return an XLSX template for feeder/load list import matching the expected columns."""
+    wb = Workbook()
+    ws = wb.active
+    headers = [
+        'cable_number', 'description', 'load_kw', 'load_kva', 'voltage', 'pf', 'efficiency',
+        'length', 'runs', 'cable_type', 'from_equipment', 'to_equipment', 'breaker_type',
+        'feeder_type', 'cores', 'quantity', 'voltage_variation', 'power_supply', 'installation',
+        'prospective_sc', 'phase_type', 'ambient_temp'
+    ]
+    ws.append(headers)
+    # sample row
+    ws.append(['C-001', 'Sample Motor', 55, 60, 415, 0.9, 0.95, 120, 1, 'C', 'E1', 'E2', 'MCC', 'FDR', 3, 1, None, '3ph', '30'])
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    headers = {
+        'Content-Disposition': 'attachment; filename="import-template.xlsx"'
+    }
+    return StreamingResponse(bio, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
 
 
 @app.get('/api/v1/catalogs/{name}')

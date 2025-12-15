@@ -9,11 +9,11 @@ interface Cable3DProps {
   size?: number
 }
 
-const Core: React.FC<{ x: number; color: string; r: number; label?: string }> = ({ x, color, r, label }) => {
+const Core: React.FC<{ x: number; y?: number; color: string; r: number; label?: string }> = ({ x, y = 0, color, r, label }) => {
   return (
-    <mesh position={[x, 0, 0]}>
+    <mesh position={[x, y, 0]}>
       <cylinderGeometry args={[r, r, 0.2, 32]} />
-      <meshStandardMaterial color={color} metalness={0.2} roughness={0.4} emissive={label ? '#052f2f' : '#000000'} />
+      <meshStandardMaterial color={color} metalness={0.25} roughness={0.15} transparent opacity={0.95} emissive={'#002f2f'} />
       {label && (
         <Text position={[0, -r - 0.6, 0]} fontSize={0.4} color="#e6eef8" anchorX="center" anchorY="middle">
           {label}
@@ -36,13 +36,15 @@ const Cable3D: React.FC<Cable3DProps> = ({ cores = 3, sheathColor = '#06b6d4', c
   // arrange cores in triangle or line based on count
   const r = Math.max(0.8, Math.sqrt(size) * 0.18)
 
-  let positions: number[] = []
-  if (cores === 1) positions = [0]
-  else if (cores === 2) positions = [-r*2.4, r*2.4]
-  else if (cores === 3) positions = [-r*2, 0, r*2]
+  // Arrange cores in circular pattern for nicer visualization
+  const positions: [number, number][] = []
+  if (cores === 1) positions.push([0, 0])
   else {
-    // spread out for >3
-    positions = Array.from({ length: cores }, (_, i) => (i - (cores - 1) / 2) * r * 2.2)
+    const ringR = r * (cores > 4 ? cores * 0.9 : 3.0)
+    for (let i = 0; i < cores; i++) {
+      const ang = (i / cores) * Math.PI * 2
+      positions.push([Math.cos(ang) * ringR, Math.sin(ang) * ringR])
+    }
   }
 
   const sheathR = r * (cores > 2 ? 2.6 : 2.8)
@@ -56,7 +58,7 @@ const Cable3D: React.FC<Cable3DProps> = ({ cores = 3, sheathColor = '#06b6d4', c
         <group rotation={[Math.PI / 2, 0, 0]}>
           <CableSheath r={sheathR} color={sheathColor} />
           {positions.map((p, i) => (
-            <Core key={i} x={p} color={coreColor} r={r} label={`${i + 1}`} />
+            <Core key={i} x={p[0]} y={p[1]} color={coreColor} r={r} label={`${i + 1}`} />
           ))}
         </group>
         <OrbitControls enablePan enableZoom enableRotate />
