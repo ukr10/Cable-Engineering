@@ -1,1 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+env/
+venv/
+
+# SQLite DB files
+*.db
+*.sqlite3
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend-dev.log
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Logs
+*.log
 node_modules
