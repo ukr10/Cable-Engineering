@@ -7,6 +7,8 @@ A full-stack web application for automating cable engineering workflows in power
 ### Current Implementation
 - **Dashboard**: Executive summary with KPIs, tray fill heatmaps, and notifications
 - **Cable Sizing Module**: Complete cable sizing calculations with IEC/IS standards
+	- Import templates and catalog templates (XLSX) for consistent uploads
+	- Results include detailed formula metadata and an optional formulas row in exports
 - **Project Setup**: Project configuration and data import wizard
 - **Responsive UI**: Modern dark theme with real-time calculations
 

@@ -60,6 +60,15 @@ interface CableResult {
   feeder_type?: string | null
   quantity?: number | null
   ampacity?: number | null
+  ampacity_base?: number | null
+  ampacity_corrected?: number | null
+  recommended_runs?: number | null
+  recommended_cores?: number | null
+  resistance_per_m?: number | null
+  reactance_per_m?: number | null
+  configuration?: string | null
+  standard_ref?: string | null
+  formulas?: Record<string, string>
   ampacity_margin?: number | null
   ampacity_margin_pct?: number | null
   vd_limit?: number | null
@@ -119,9 +128,10 @@ const CableSizing: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [visibleColumns, setVisibleColumns] = useState<string[]>([
-    'cable_number', 'flc', 'derated_current', 'selected_size', 'voltage_drop', 'sc_check', 'status', 'breaker_type', 'feeder_type', 'quantity', 'ampacity', 'vd_pass', 'vd_limit', 'ampacity_margin'
+    'cable_number', 'flc', 'derated_current', 'selected_size', 'recommended_runs', 'recommended_cores', 'voltage_drop', 'sc_check', 'status', 'breaker_type', 'feeder_type', 'quantity', 'ampacity', 'ampacity_base', 'ampacity_corrected', 'resistance_per_m', 'reactance_per_m', 'configuration', 'standard_ref', 'vd_pass', 'vd_limit', 'ampacity_margin'
   ])
   const [showColumnModal, setShowColumnModal] = useState(false)
+  const [showFormulasRow, setShowFormulasRow] = useState(true)
   const [catalogs, setCatalogs] = useState<string[]>([])
   const [selectedCatalog, setSelectedCatalog] = useState<string | null>(null)
   const catalogFileRef = useRef<HTMLInputElement>(null)
@@ -212,8 +222,8 @@ const CableSizing: React.FC = () => {
         setResults([])
         setActiveTab('input')
         // select all by default so user can quickly calculate
-        setSelectedCables(new Set(mapped.map(m => m.id)))
-        alert(`✅ Imported ${mapped.length} cables into input data`)
+        setSelectedCables(new Set(mapped.map((m:any) => m.id)))
+        alert(`✅ Imported ${mapped.length} cables into input data. Note: 'runs' and 'cores' fields (if present) will be recalculated during sizing and are not required in the import.`)
       } else if (response.data.results && response.data.results.length > 0) {
         setResults(response.data.results)
         setActiveTab('results')
@@ -300,7 +310,7 @@ const CableSizing: React.FC = () => {
 
   // Export functions
   const exportToCSV = () => {
-    const headers = ['Cable Number', 'FLC (A)', 'Derated (A)', 'Size (mm²)', 'V-drop %', 'SC Check', 'Ampacity (A)', 'VD Pass', 'Prospective SC', 'AO', 'Status']
+    const headers = ['Cable Number', 'FLC (A)', 'Derated (A)', 'Size (mm²)', 'Runs', 'Cores', 'V-drop %', 'SC Check', 'Ampacity Base (A)', 'Ampacity Corrected (A)', 'Ampacity (A)', 'VD Pass', 'Prospective SC', 'AO', 'Configuration', 'Standard', 'Status']
     const rows = results
       .filter(r => !Array.from(visibleColumns).includes('hidden') || r.status !== 'hidden')
         .map(r => [
@@ -308,12 +318,18 @@ const CableSizing: React.FC = () => {
         r.flc,
         r.derated_current,
         r.selected_size,
+        (r as any).recommended_runs ?? '',
+        (r as any).recommended_cores ?? '',
         r.voltage_drop,
         r.sc_check ? 'PASS' : 'FAIL',
+        (r as any).ampacity_base ?? '',
+        (r as any).ampacity_corrected ?? '',
         r.ampacity ?? '',
         r.vd_pass ? 'PASS' : 'FAIL',
         r.prospective_sc ?? '',
         r.ao ? 'AO' : 'AN',
+        (r as any).configuration ?? '',
+        (r as any).standard_ref ?? '',
         r.status,
       ])
 
@@ -347,27 +363,89 @@ const CableSizing: React.FC = () => {
       alert('No cables selected')
       return
     }
+    // Build header and formula rows
+    const headers: string[] = []
+    const formulaRow: string[] = []
+    if (visibleColumns.includes('cable_number')) { headers.push('Cable'); formulaRow.push('') }
+    if (visibleColumns.includes('flc')) { headers.push('FLC_A'); formulaRow.push((selected[0] as any).formulas?.flc ?? '') }
+    if (visibleColumns.includes('derated_current')) { headers.push('Derated_A'); formulaRow.push((selected[0] as any).formulas?.derated ?? '') }
+    if (visibleColumns.includes('selected_size')) { headers.push('Selected_Size_mm2'); formulaRow.push((selected[0] as any).formulas?.runs ?? '') }
+    if (visibleColumns.includes('voltage_drop')) { headers.push('V_drop_pct'); formulaRow.push((selected[0] as any).formulas?.vd ?? '') }
+    if (visibleColumns.includes('sc_check')) { headers.push('SC_Check'); formulaRow.push('') }
+    if (visibleColumns.includes('ampacity')) { headers.push('Ampacity_A'); formulaRow.push((selected[0] as any).formulas?.ampacity ?? '') }
+    if (visibleColumns.includes('ampacity_base')) { headers.push('Ampacity_Base_A'); formulaRow.push((selected[0] as any).formulas?.ampacity ?? '') }
+    if (visibleColumns.includes('ampacity_corrected')) { headers.push('Ampacity_Corrected_A'); formulaRow.push((selected[0] as any).formulas?.ampacity_correction ?? '') }
+    if (visibleColumns.includes('recommended_runs')) { headers.push('Recommended_Runs'); formulaRow.push((selected[0] as any).formulas?.runs ?? '') }
+    if (visibleColumns.includes('recommended_cores')) { headers.push('Recommended_Cores'); formulaRow.push('') }
+    if (visibleColumns.includes('resistance_per_m')) { headers.push('R_ohm_per_m'); formulaRow.push('') }
+    if (visibleColumns.includes('reactance_per_m')) { headers.push('X_ohm_per_m'); formulaRow.push('') }
+    if (visibleColumns.includes('configuration')) { headers.push('Configuration'); formulaRow.push('') }
+    // always include Standard column at the end (avoid duplicates)
+    if (visibleColumns.includes('vd_pass')) { headers.push('VD_Pass'); formulaRow.push('') }
+    if (visibleColumns.includes('prospective_sc')) { headers.push('Prospective_SC_A'); formulaRow.push('') }
+    if (visibleColumns.includes('ao')) { headers.push('AO_AN'); formulaRow.push((selected[0] as any).formulas?.adiabatic ?? '') }
+    headers.push('Status'); formulaRow.push('')
+    headers.push('Standard'); formulaRow.push(standard)
 
-    const wsData = selected.map(r => {
-      const obj:any = {}
-      if (visibleColumns.includes('cable_number')) obj['Cable'] = r.cable_number
-      if (visibleColumns.includes('flc')) obj['FLC_A'] = r.flc
-      if (visibleColumns.includes('derated_current')) obj['Derated_A'] = r.derated_current
-      if (visibleColumns.includes('selected_size')) obj['Selected_Size_mm2'] = r.selected_size
-      if (visibleColumns.includes('voltage_drop')) obj['V_drop_pct'] = r.voltage_drop
-      if (visibleColumns.includes('sc_check')) obj['SC_Check'] = r.sc_check ? 'PASS' : 'FAIL'
-      if (visibleColumns.includes('ampacity')) obj['Ampacity_A'] = r.ampacity ?? ''
-      if (visibleColumns.includes('vd_pass')) obj['VD_Pass'] = r.vd_pass ? 'PASS' : 'FAIL'
-      if (visibleColumns.includes('prospective_sc')) obj['Prospective_SC_A'] = r.prospective_sc ?? ''
-      if (visibleColumns.includes('ao')) obj['AO_AN'] = r.ao ? 'AO' : 'AN'
-      obj['Status'] = r.status
-      obj['Standard'] = standard
-      return obj
+    const dataRows = selected.map(r => {
+      const row: any[] = []
+      if (visibleColumns.includes('cable_number')) row.push(r.cable_number)
+      if (visibleColumns.includes('flc')) row.push(r.flc)
+      if (visibleColumns.includes('derated_current')) row.push(r.derated_current)
+      if (visibleColumns.includes('selected_size')) row.push(r.selected_size)
+      if (visibleColumns.includes('voltage_drop')) row.push(r.voltage_drop)
+      if (visibleColumns.includes('sc_check')) row.push(r.sc_check ? 'PASS' : 'FAIL')
+      if (visibleColumns.includes('ampacity')) row.push(r.ampacity ?? '')
+      if (visibleColumns.includes('ampacity_base')) row.push((r as any).ampacity_base ?? '')
+      if (visibleColumns.includes('ampacity_corrected')) row.push((r as any).ampacity_corrected ?? '')
+      if (visibleColumns.includes('recommended_runs')) row.push((r as any).recommended_runs ?? '')
+      if (visibleColumns.includes('recommended_cores')) row.push((r as any).recommended_cores ?? '')
+      if (visibleColumns.includes('resistance_per_m')) row.push((r as any).resistance_per_m ?? '')
+      if (visibleColumns.includes('reactance_per_m')) row.push((r as any).reactance_per_m ?? '')
+      if (visibleColumns.includes('configuration')) row.push((r as any).configuration ?? '')
+      if (visibleColumns.includes('standard_ref')) row.push((r as any).standard_ref ?? '')
+      if (visibleColumns.includes('vd_pass')) row.push(r.vd_pass ? 'PASS' : 'FAIL')
+      if (visibleColumns.includes('prospective_sc')) row.push(r.prospective_sc ?? '')
+      if (visibleColumns.includes('ao')) row.push(r.ao ? 'AO' : 'AN')
+      row.push(r.status)
+      row.push(standard)
+      // Append formulas as JSON string column for reference
+      if ((r as any).formulas) row.push(JSON.stringify((r as any).formulas))
+      return row
     })
 
-    const ws = XLSX.utils.json_to_sheet(wsData)
+    const aoa = [headers, formulaRow, ...dataRows]
+    const ws = XLSX.utils.aoa_to_sheet(aoa)
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Cables')
+    // Add Formulas and Abbreviations sheet
+    const formulaSheet: any[] = [['Key', 'Formula'],]
+    if (selected[0] && (selected[0] as any).formulas) {
+      Object.entries((selected[0] as any).formulas).forEach(([k, v]) => {
+        formulaSheet.push([k, v as string])
+      })
+    }
+    const abbrSheet = [
+      ['Symbol', 'Meaning'],
+      ['I', 'Current (A)'],
+      ['P', 'Active Power (kW)'],
+      ['V', 'Voltage (V)'],
+      ['PF', 'Power Factor'],
+      ['η', 'Efficiency'],
+      ['K_group', 'Grouping factor'],
+      ['K_temp', 'Temperature correction'],
+      ['K_inst', 'Installation correction'],
+      ['L', 'Length (m)'],
+      ['R', 'Resistance (Ω/m)'],
+      ['X', 'Reactance (Ω/m)'],
+      ['Z', 'Impedance (Ω/m) (√(R²+X²))'],
+      ['S', 'Conductor cross-section (mm²)'],
+      ['t', 'Fault duration (s)']
+    ]
+    const fWs = XLSX.utils.aoa_to_sheet(formulaSheet)
+    const aWs = XLSX.utils.aoa_to_sheet(abbrSheet)
+    XLSX.utils.book_append_sheet(wb, fWs, 'Formulas')
+    XLSX.utils.book_append_sheet(wb, aWs, 'Abbreviations')
     XLSX.writeFile(wb, `cable_sizing_selected_${new Date().toISOString().split('T')[0]}.xlsx`)
   }
 
@@ -439,15 +517,26 @@ const CableSizing: React.FC = () => {
 
   // 3D Cable Visualization Component
   const CableVisualizationPanel: React.FC<{ cable: CableVisualization }> = ({ cable }) => {
+    const [paired, setPaired] = useState(false)
+
     return (
-      <div className="card-glow p-6 rounded-xl" style={{ width: 360 }}>
-        <h3 className="text-lg font-semibold text-white mb-4">Cable Specification</h3>
+      <div className="card-glow p-6 rounded-xl relative" style={{ width: 360 }}>
+        <button onClick={() => setSelectedVisualization(null)} title="Close" className="absolute top-3 right-3 text-slate-400 hover:text-white p-1 rounded bg-slate-800/30">
+          <X className="w-4 h-4" />
+        </button>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-white">Cable Specification</h3>
+          <div className="flex items-center gap-3">
+            <label className="text-xs text-gray-400">Paired</label>
+            <input type="checkbox" className="rounded" checked={paired} onChange={(e) => setPaired(e.target.checked)} />
+          </div>
+        </div>
         
         {/* Simple 3D-like cable representation */}
         <div className="bg-slate-900/50 rounded-lg p-8 mb-6">
           <div className="flex items-center justify-center mb-6">
-            <div className="w-40 h-40">
-              <Cable3D cores={cable.cores} size={cable.size} />
+              <div className="w-40 h-40">
+              <Cable3D cores={cable.cores} size={cable.size} paired={paired} />
             </div>
           </div>
 
@@ -483,6 +572,27 @@ const CableSizing: React.FC = () => {
                 <p className="text-xs font-mono text-cyan-300">{cable.toEquipment}</p>
               </div>
             </div>
+
+            {/* Formulas & Abbreviations panel */}
+            {showFormulasRow && (
+              <div className="mt-4 p-4 rounded bg-slate-900 border border-gray-700 text-sm text-gray-300">
+                <div className="mb-2 font-medium text-white">Formulas (short)</div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                  <div>I = P / (√3 × V × PF × η) — FLC</div>
+                  <div>I_d = I / (K_group × K_temp × K_inst) — Derated current</div>
+                  <div>n = ceil(I_d / I_corr) — Runs</div>
+                  <div>Vd% = (√3 × I_run × L × Z) / V × 100, Z = √(R² + X²)</div>
+                  <div>I_adiabatic = K × sqrt(S / t) — Adiabatic</div>
+                  <div>I_corr = I_base × K_group × K_temp × K_inst — Corrected ampacity</div>
+                </div>
+                <div className="mt-3 text-xs text-gray-400">
+                  <div className="font-medium mb-1">Abbreviations</div>
+                  <div>I: Current (A) · P: Active Power (kW) · V: Voltage (V) · PF: Power Factor · η: Efficiency</div>
+                  <div>K_group: Grouping factor · K_temp: Temperature factor · K_inst: Installation factor</div>
+                  <div>L: Length (m) · R: Resistance (Ω/m) · X: Reactance (Ω/m) · Z: Impedance (Ω/m)</div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -820,7 +930,7 @@ const CableSizing: React.FC = () => {
                     })()
                   }}
                   disabled={loading}
-                  className="px-6 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 text-white font-semibold hover:from-cyan-600 hover:to-blue-600 transition-all disabled:opacity-50"
+                  className="px-4 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 text-white font-semibold hover:from-cyan-600 hover:to-blue-600 transition-all disabled:opacity-50 text-sm"
                 >
                   <Zap className="w-5 h-5" />
                   {loading ? 'Calculating...' : 'Calculate Selected'}
@@ -828,12 +938,12 @@ const CableSizing: React.FC = () => {
 
                 <button
                   onClick={handleCalculate}
-              disabled={loading}
-              className="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 text-white font-semibold hover:from-cyan-600 hover:to-blue-600 transition-all disabled:opacity-50"
-            >
-              <Zap className="w-5 h-5" />
-              {loading ? 'Calculating...' : 'Calculate Cables'}
-            </button>
+                  disabled={loading}
+                  className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 text-white font-semibold hover:from-cyan-600 hover:to-blue-600 transition-all disabled:opacity-50 text-sm"
+                >
+                  <Zap className="w-5 h-5" />
+                  {loading ? 'Calculating...' : 'Calculate Cables'}
+                </button>
               </div>
           </div>
         </div>
@@ -889,6 +999,12 @@ const CableSizing: React.FC = () => {
                   Columns
                 </button>
                 <button
+                  onClick={() => setShowFormulasRow(prev => !prev)}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg ${showFormulasRow ? 'bg-yellow-500/20 text-yellow-300 hover:bg-yellow-500/30' : 'bg-slate-700/20 text-slate-200 hover:bg-slate-700/30'}`}
+                >
+                  Formulas
+                </button>
+                <button
                   onClick={exportSelectedToXLSX}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30"
                 >
@@ -931,7 +1047,7 @@ const CableSizing: React.FC = () => {
                     <th className="text-left py-3 px-4 text-gray-400 font-medium">
                       <input type="checkbox" onChange={(e) => {
                         if (e.target.checked) {
-                          setSelectedCables(new Set(results.map(r => r.id)))
+                              setSelectedCables(new Set(results.map(r => r.id)))
                         } else {
                           setSelectedCables(new Set())
                         }
@@ -941,14 +1057,59 @@ const CableSizing: React.FC = () => {
                     {visibleColumns.includes('flc') && <th className="text-left py-3 px-4 text-gray-400 font-medium">FLC (A)</th>}
                     {visibleColumns.includes('derated_current') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Derated (A)</th>}
                     {visibleColumns.includes('selected_size') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Size</th>}
+                    {visibleColumns.includes('recommended_runs') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Runs</th>}
+                    {visibleColumns.includes('recommended_cores') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Cores</th>}
+                    {visibleColumns.includes('ampacity_base') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Ampacity Base (A)</th>}
+                    {visibleColumns.includes('ampacity_corrected') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Ampacity Corr (A)</th>}
+                    {visibleColumns.includes('resistance_per_m') && <th className="text-left py-3 px-4 text-gray-400 font-medium">R (Ω/m)</th>}
+                    {visibleColumns.includes('reactance_per_m') && <th className="text-left py-3 px-4 text-gray-400 font-medium">X (Ω/m)</th>}
+                    {visibleColumns.includes('configuration') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Configuration</th>}
+                    {visibleColumns.includes('standard_ref') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Standard</th>}
                     {visibleColumns.includes('breaker_type') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Breaker</th>}
                     {visibleColumns.includes('feeder_type') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Feeder</th>}
                     {visibleColumns.includes('quantity') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Qty</th>}
                     {visibleColumns.includes('voltage_drop') && <th className="text-left py-3 px-4 text-gray-400 font-medium">V-drop %</th>}
+                        {visibleColumns.includes('recommended_runs') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Runs</th>}
+                        {visibleColumns.includes('recommended_cores') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Cores</th>}
+                        {visibleColumns.includes('ampacity_base') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Ampacity Base (A)</th>}
+                        {visibleColumns.includes('ampacity_corrected') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Ampacity Corr (A)</th>}
+                        {visibleColumns.includes('resistance_per_m') && <th className="text-left py-3 px-4 text-gray-400 font-medium">R (Ω/m)</th>}
+                        {visibleColumns.includes('reactance_per_m') && <th className="text-left py-3 px-4 text-gray-400 font-medium">X (Ω/m)</th>}
+                        {visibleColumns.includes('configuration') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Configuration</th>}
+                        {visibleColumns.includes('standard_ref') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Standard</th>}
                     {visibleColumns.includes('sc_check') && <th className="text-left py-3 px-4 text-gray-400 font-medium">SC</th>}
                     {visibleColumns.includes('status') && <th className="text-left py-3 px-4 text-gray-400 font-medium">Status</th>}
                     <th className="text-left py-3 px-4 text-gray-400 font-medium">Actions</th>
                   </tr>
+                  {showFormulasRow && results.length > 0 && (
+                    <tr className="border-b border-gray-700 bg-slate-800/40 text-xs text-gray-400">
+                      <th />
+                      {visibleColumns.includes('cable_number') && <th className="py-2 px-4">{results[0].id ? '' : ''}</th>}
+                      {visibleColumns.includes('flc') && <th className="py-2 px-4">{(results[0] as any).formulas?.flc ?? ''}</th>}
+                      {visibleColumns.includes('derated_current') && <th className="py-2 px-4">{(results[0] as any).formulas?.derated ?? ''}</th>}
+                      {visibleColumns.includes('selected_size') && <th className="py-2 px-4">{(results[0] as any).formulas?.runs ?? ''}</th>}
+                      {visibleColumns.includes('breaker_type') && <th className="py-2 px-4" />}
+                      {visibleColumns.includes('feeder_type') && <th className="py-2 px-4" />}
+                      {visibleColumns.includes('quantity') && <th className="py-2 px-4" />}
+                      {visibleColumns.includes('voltage_drop') && <th className="py-2 px-4">{(results[0] as any).formulas?.vd ?? ''}</th>}
+                          {visibleColumns.includes('recommended_runs') && <th className="py-2 px-4">{(results[0] as any).formulas?.runs ?? ''}</th>}
+                          {visibleColumns.includes('recommended_cores') && <th className="py-2 px-4" />}
+                          {visibleColumns.includes('ampacity_base') && <th className="py-2 px-4">{(results[0] as any).formulas?.ampacity ?? ''}</th>}
+                          {visibleColumns.includes('ampacity_corrected') && <th className="py-2 px-4">{(results[0] as any).formulas?.ampacity_correction ?? ''}</th>}
+                          {visibleColumns.includes('resistance_per_m') && <th className="py-2 px-4">{''}</th>}
+                          {visibleColumns.includes('reactance_per_m') && <th className="py-2 px-4">{''}</th>}
+                          {visibleColumns.includes('configuration') && <th className="py-2 px-4">{''}</th>}
+                          {visibleColumns.includes('standard_ref') && <th className="py-2 px-4">{(results[0] as any).standard_ref ?? ''}</th>}
+                      {visibleColumns.includes('sc_check') && <th className="py-2 px-4" />}
+                      {visibleColumns.includes('status') && <th className="py-2 px-4" />}
+                          {visibleColumns.includes('ampacity') && <th className="py-2 px-4">{(results[0] as any).formulas?.ampacity ?? ''}</th>}
+                      {visibleColumns.includes('vd_pass') && <th className="py-2 px-4" />}
+                      {visibleColumns.includes('vd_limit') && <th className="py-2 px-4" />}
+                      {visibleColumns.includes('ampacity_margin') && <th className="py-2 px-4" />}
+                      {visibleColumns.includes('ao') && <th className="py-2 px-4">{(results[0] as any).formulas?.adiabatic ?? ''}</th>}
+                      <th />
+                    </tr>
+                  )}
                 </thead>
                 <tbody>
                   {results.filter(r => r.status !== 'hidden').map((result) => (
@@ -982,6 +1143,16 @@ const CableSizing: React.FC = () => {
                           {result.selected_size} mm²
                         </td>
                       )}
+                      {visibleColumns.includes('recommended_runs') && <td className="py-3 px-4 text-gray-300">{(result as any).recommended_runs ?? '—'}</td>}
+                      {visibleColumns.includes('recommended_cores') && <td className="py-3 px-4 text-gray-300">{(result as any).recommended_cores ?? '—'}</td>}
+                      {visibleColumns.includes('ampacity_base') && <td className="py-3 px-4 text-gray-300">{(result as any).ampacity_base ?? '—'}</td>}
+                      {visibleColumns.includes('ampacity_corrected') && <td className="py-3 px-4 text-gray-300">{(result as any).ampacity_corrected ?? '—'}</td>}
+                      {visibleColumns.includes('resistance_per_m') && <td className="py-3 px-4 text-gray-300">{(result as any).resistance_per_m ?? '—'}</td>}
+                      {visibleColumns.includes('reactance_per_m') && <td className="py-3 px-4 text-gray-300">{(result as any).reactance_per_m ?? '—'}</td>}
+                      {visibleColumns.includes('configuration') && <td className="py-3 px-4 text-gray-300">{(result as any).configuration ?? '—'}</td>}
+                      {visibleColumns.includes('standard_ref') && <td className="py-3 px-4 text-gray-300">{(result as any).standard_ref ?? '—'}</td>}
+                      {visibleColumns.includes('recommended_runs') && <td className="py-3 px-4 text-gray-300">{(result as any).recommended_runs ?? '—'}</td>}
+                      {visibleColumns.includes('recommended_cores') && <td className="py-3 px-4 text-gray-300">{(result as any).recommended_cores ?? '—'}</td>}
                       {visibleColumns.includes('breaker_type') && <td className="py-3 px-4">{result.breaker_type}</td>}
                       {visibleColumns.includes('feeder_type') && <td className="py-3 px-4">{result.feeder_type}</td>}
                       {visibleColumns.includes('quantity') && <td className="py-3 px-4">{result.quantity}</td>}
@@ -1080,6 +1251,14 @@ const CableSizing: React.FC = () => {
             </div>
             <div className="space-y-2">
               {[
+                { key: 'recommended_runs', label: 'Recommended Runs' },
+                { key: 'recommended_cores', label: 'Recommended Cores' },
+                { key: 'ampacity_base', label: 'Ampacity Base (A)' },
+                { key: 'ampacity_corrected', label: 'Ampacity Corrected (A)' },
+                { key: 'resistance_per_m', label: 'Resistance (Ω/m)' },
+                { key: 'reactance_per_m', label: 'Reactance (Ω/m)' },
+                { key: 'configuration', label: 'Configuration' },
+                { key: 'standard_ref', label: 'Standard' },
                 { key: 'cable_number', label: 'Cable' },
                 { key: 'flc', label: 'FLC (A)' },
                 { key: 'derated_current', label: 'Derated (A)' },
@@ -1235,6 +1414,16 @@ const CableSizing: React.FC = () => {
                 <input type="number" value={editResult.prospective_sc ?? 0} onChange={(e) => setEditResult({ ...editResult, prospective_sc: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" />
                 <label className="text-sm text-gray-400">Approval (AO/AN)</label>
                 <div className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-gray-400">{editResult.ao ? 'AO' : 'AN'}</div>
+                {editResult.formulas && (
+                  <div className="mt-2 p-2 bg-slate-800 border border-slate-700 rounded">
+                    <div className="text-sm text-gray-300 font-medium mb-1">Formulas</div>
+                    <div className="text-xs text-gray-400">
+                      {Object.entries(editResult.formulas).map(([k, v]) => (
+                        <div key={k} className="mb-1"><strong className="text-gray-200">{k}:</strong> {v}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <label className="text-sm text-gray-400">Ampacity (A)</label>
                 <input type="number" value={editResult.ampacity || 0} onChange={(e) => setEditResult({ ...editResult, ampacity: Number(e.target.value) })} className="px-3 py-2 rounded bg-slate-800 border border-slate-700 text-white" />
                 <label className="text-sm text-gray-400">V-drop Limit (%)</label>

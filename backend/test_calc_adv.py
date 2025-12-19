@@ -39,10 +39,9 @@ def test_adiabatic_capacity():
     assert I > 0
 
 
-@pytest.mark.asyncio
-async def test_calculate_single_cable():
+def test_calculate_single_cable():
     cable = CableInput(cable_number='T-001', description='calc-test', load_kw=50, voltage=415, pf=0.9, efficiency=0.95, length=30, runs=1)
-    res = await calculate_single_cable(cable)
+    res = asyncio.run(calculate_single_cable(cable))
     assert res.flc > 0
     assert res.voltage_drop >= 0
     assert res.ampacity is not None

@@ -63,6 +63,7 @@ python -m uvicorn main:app --reload
 5. Click cable to view 3D visualization
 6. Use checkboxes to approve/reject
 7. Export to CSV or JSON
+8. Use XLSX export to include a formulas row: toggle **Formulas** on the results toolbar to include a second header row with the calculation formulas used and a column containing the formulas as JSON for each exported cable.
 
 ### 2. Cable Routing Workflow
 1. Navigate to **Cable Routing**
@@ -198,6 +199,7 @@ python -m uvicorn main:app --port 8001
 3. **Advanced Visualization**: Integrate Three.js for 3D
 4. **Reporting**: Implement PDF export
 5. **Deployment**: Set up CI/CD pipeline
+6. **CI**: A GitHub Actions workflow (`.github/workflows/ci.yml`) is included to run backend tests on push/PR.
 
 ## Support
 

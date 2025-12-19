@@ -88,6 +88,8 @@ class CableResult(BaseModel):
     quantity: Optional[int] = None
     # additional diagnostics
     ampacity: Optional[float] = None
+    ampacity_base: Optional[float] = None
+    ampacity_corrected: Optional[float] = None
     ampacity_margin: Optional[float] = None
     ampacity_margin_pct: Optional[float] = None
     vd_limit: Optional[float] = None
@@ -96,6 +98,13 @@ class CableResult(BaseModel):
     resistance_per_m: Optional[float] = None
     prospective_sc: Optional[float] = None
     standard: Optional[str] = None
+    recommended_cores: Optional[int] = None
+    recommended_runs: Optional[int] = None
+    resistance_per_m: Optional[float] = None
+    reactance_per_m: Optional[float] = None
+    configuration: Optional[str] = None
+    standard_ref: Optional[str] = None
+    formulas: Optional[Dict[str, str]] = None
 
 class ExcelUploadResponse(BaseModel):
     success: bool
@@ -194,8 +203,13 @@ def adiabatic_short_circuit_capacity(size_mm2: float, t: float = 1.0, k: float =
         return 0.0
 
 def calculate_voltage_drop(flc: float, length: float, voltage: float, runs: int = 1, 
-                          resistance: Optional[float] = None, size_mm2: Optional[float] = None) -> float:
-    """Calculate voltage drop percentage: Vd% = (√3 × I × L × mV/A·m) / V × 100"""
+                          resistance: Optional[float] = None, size_mm2: Optional[float] = None, reactance: Optional[float] = None) -> float:
+    """Calculate voltage drop percentage.
+
+    Uses magnitude of impedance (R and X) when both are available:
+    Vd% = (√3 × I_per_run × L × √(R^2 + X^2)) / V × 100
+    Falls back to resistance-only calculation when reactance is None.
+    """
     if voltage == 0:
         return 0
     # If resistance is not supplied, derive from conductor size
@@ -208,10 +222,14 @@ def calculate_voltage_drop(flc: float, length: float, voltage: float, runs: int 
 
     # With multiple runs (parallel conductors), current per conductor decreases
     i_per_run = flc / (runs if runs and runs > 0 else 1)
-    vd = (math.sqrt(3) * i_per_run * length * resistance_per_m) / voltage
+    if reactance is not None:
+        z = math.sqrt((resistance_per_m or 0.0) ** 2 + (reactance) ** 2)
+        vd = (math.sqrt(3) * i_per_run * length * z) / voltage
+    else:
+        vd = (math.sqrt(3) * i_per_run * length * resistance_per_m) / voltage
     return vd * 100
 
-def select_cable_size(derated_current: float, standard: str = "IEC", catalog_name: Optional[str] = None) -> Tuple[str, float, float, Optional[float]]:
+def select_cable_size(derated_current: float, standard: str = "IEC", catalog_name: Optional[str] = None, grouping: float = 1.0, temp_factor: float = 1.0) -> Tuple[str, float, float, Optional[float], Optional[int], Optional[int]]:
     """Select cable size and return (size_string, size_mm2)"""
     # If a catalog_name is provided, load catalog from DB/in-memory
     catalog_list = None
@@ -242,22 +260,61 @@ def select_cable_size(derated_current: float, standard: str = "IEC", catalog_nam
         for amps, size in cable_sizes_iec:
             if derated_current <= amps:
                 res = get_resistance_per_m(size)
-                return (f"3 x {size}", size, amps, res)
+                return (f"3 x {size}", size, amps, res, 1, 3)
+        # If derated_current exceeds table, compute parallel runs of largest conductor
+        max_amps, max_size = cable_sizes_iec[-1]
+        runs_needed = int(math.ceil(derated_current / max_amps)) if max_amps > 0 else None
+        res = get_resistance_per_m(max_size)
+        return (f"3 x {max_size} (runs={runs_needed})", max_size, float(max_amps), res, runs_needed, 3)
     else:
         # If catalog_list exists, try to find appropriate size by ampacity
         if catalog_list:
+            # Try to find a single conductor that meets derated_current, else compute runs
+            best_option = None
+            # generate options for multicore and single-core paralleled approaches
+            best_option = None
             for entry in catalog_list:
-                if derated_current <= entry.get('ampacity', 0):
-                    size = entry.get('size_mm2') or entry.get('size')
-                    try:
-                        res = float(entry.get('resistance_per_m') or entry.get('resistance_per_km') or 0) if (entry.get('resistance_per_m') or entry.get('resistance_per_km')) else None
-                        if res is not None and res > 1:  # if given in ohm/km
-                            res = res / 1000.0
-                        return (f"3 x {size}", float(size), float(entry.get('ampacity') or entry.get('amp') or 0), res)
-                    except Exception:
-                        continue
+                size = entry.get('size_mm2') or entry.get('size')
+                if not size:
+                    continue
+                base_amp, amp_corrected, _src = compute_ampacity_from_entry(entry, standard=standard, grouping_factor=grouping, temp_factor=temp_factor)
+                amp = amp_corrected or base_amp or 0
+                # Option: single run of this cable
+                if amp and amp >= derated_current:
+                    res = entry.get('resistance_per_m')
+                    return (f"{int(entry.get('cores') or 3)}C x {size} mm²", float(size), float(base_amp or amp), res, 1, int(entry.get('cores') or 3))
+
+                # Option: compute runs required (paralleling)
+                if amp and amp > 0:
+                    runs = int(math.ceil(derated_current / amp))
+                else:
+                    runs = None
+
+                par_allowed = entry.get('paralleled_count') or None
+                # if par_allowed present and runs > par_allowed, mark as not allowed
+                if par_allowed and runs and runs > par_allowed:
+                    allowed = False
+                else:
+                    allowed = True
+
+                option = {'entry': entry, 'runs': runs, 'size': float(size), 'amp': float(amp or 0), 'allowed': allowed}
+                if not allowed:
+                    continue
+                if best_option is None:
+                    best_option = option
+                else:
+                    # prefer fewer runs, then smaller size
+                    if option['runs'] is not None and best_option['runs'] is not None:
+                        if option['runs'] < best_option['runs'] or (option['runs'] == best_option['runs'] and option['size'] < best_option['size']):
+                            best_option = option
+                    elif option['runs'] is not None:
+                        best_option = option
+            if best_option:
+                entry = best_option['entry']
+                res = entry.get('resistance_per_m')
+                return (f"{int(entry.get('cores') or 3)}C x {best_option['size']} mm² (runs={best_option['runs']})", best_option['size'], best_option['amp'], res, int(best_option['runs']) if best_option['runs'] is not None else None, int(entry.get('cores') or 3))
     
-    return ("3 x 300", 300, 0, None)
+    return ("3 x 300", 300, 0, None, None, 3)
 
 def check_short_circuit(cable_size: float) -> bool:
     """Simplified short circuit check"""
@@ -299,6 +356,55 @@ def get_resistance_per_m(size_mm2: float) -> float:
         if size_mm2 <= k:
             return table_ohm_per_km[k] / 1000.0
     return table_ohm_per_km[keys[-1]] / 1000.0
+
+
+def compute_ampacity_from_entry(entry: Dict[str, Any], standard: str = 'IEC', grouping_factor: float = 1.0, temp_factor: float = 1.0, installation_factor: float = 1.0) -> Tuple[Optional[float], Optional[float], str]:
+    """Compute corrected ampacity for a catalog `entry` using derating factors.
+
+    Returns (corrected_ampacity, source_description).
+    """
+    base_amp = None
+    source = 'none'
+    if entry is None:
+        return None, source
+
+    # Prefer air ampacity if present, else ground, else None
+    if entry.get('ampacity_air'):
+        base_amp = float(entry.get('ampacity_air'))
+        source = 'ampacity_air'
+    elif entry.get('ampacity_ground'):
+        base_amp = float(entry.get('ampacity_ground'))
+        source = 'ampacity_ground'
+    elif entry.get('ampacity'):
+        base_amp = float(entry.get('ampacity'))
+        source = 'ampacity'
+    elif entry.get('size_mm2'):
+        # fallback: map size to IEC table default amps
+        size = float(entry.get('size_mm2'))
+        # simple default mapping from size to typical amps
+        default_map = {1.5:10,2.5:16,4:25,6:35,10:50,16:63,25:80,35:100,50:125,70:160,95:200,120:250,150:315,185:400,240:500}
+        # find nearest >= size
+        chosen = None
+        keys = sorted(default_map.keys())
+        for k in keys:
+            if size <= k:
+                chosen = default_map[k]
+                break
+        if not chosen:
+            chosen = default_map[keys[-1]]
+        base_amp = float(chosen)
+        source = 'default_table'
+
+    if base_amp is None:
+        return None, None, source
+
+    corrected = base_amp * grouping_factor * temp_factor * installation_factor
+    if standard and standard.lower().startswith('is'):
+        # IS often uses slightly stricter corrections
+        corrected = corrected * 0.95
+        source += '->IS_adjusted'
+
+    return base_amp, corrected, source
 
 # ==================== Excel Import ====================
 
@@ -374,7 +480,21 @@ def parse_excel_cables(file_content: bytes) -> Tuple[List[CableInput], List[str]
 
 
 def parse_catalog_excel(file_content: bytes) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Parse catalog excel (size, ampacity) into a list of dicts"""
+    """Parse catalog excel into a list of dicts.
+
+    Expected/accepted headers (case-insensitive examples):
+      - size_mm2 or size
+      - cores (e.g., 3, 3.5, 4)
+      - ampacity_air or air
+      - ampacity_ground or ground
+      - resistance_90c_ohm_per_km or resistance_ohm_per_km
+      - reactance_ohm_per_km or reactance
+      - cable_dia_mm or cable_dia
+      - xlpe
+      - grouping_k2
+
+    This parser normalizes values and returns entries with ohm/m units for resistance/reactance.
+    """
     errors = []
     catalog = []
     if not load_workbook:
@@ -383,23 +503,92 @@ def parse_catalog_excel(file_content: bytes) -> Tuple[List[Dict[str, Any]], List
     try:
         workbook = load_workbook(io.BytesIO(file_content))
         sheet = workbook.active
-        # Validate header row
-        header_row = [str(cell).strip().lower().replace(' ', '_') for cell in next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
-        if not any(h in header_row for h in ('size_mm2', 'size', 'ampacity')):
-            errors.append('Missing header: expected columns `size_mm2` and `ampacity` (first row).')
-            return catalog, errors
-        # Expect headers like: size_mm2, ampacity
+
+        # Build header map from first row
+        header_row = [str(cell).strip() if cell is not None else '' for cell in next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
+        headers = [h.lower().strip().replace(' ', '_').replace('.', '').replace('-', '_') for h in header_row]
+        idx_map = {name: i for i, name in enumerate(headers)}
+
+        def get_cell(row, key):
+            i = idx_map.get(key)
+            if i is None or i >= len(row):
+                return None
+            return row[i]
+
         for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
             try:
-                if not row[0]:
+                if not any(cell is not None for cell in row):
                     continue
-                size = float(row[0])
-                ampacity = float(row[1]) if row[1] is not None else 0
-                catalog.append({ 'size_mm2': size, 'ampacity': ampacity })
+
+                size = get_cell(row, 'size_mm2') or get_cell(row, 'size')
+                cores = get_cell(row, 'cores') or get_cell(row, 'no_of_cores')
+                amp_air = get_cell(row, 'ampacity_air') or get_cell(row, 'air') or get_cell(row, 'current_rating_of_the_cable')
+                amp_ground = get_cell(row, 'ampacity_ground') or get_cell(row, 'ground')
+                res_km = get_cell(row, 'resistance_90deg_ohm_per_km') or get_cell(row, 'resistance_90deg_ohmperkm') or get_cell(row, 'resistance_ohm_per_km') or get_cell(row, 'resistance')
+                react_km = get_cell(row, 'reactance_ohm_per_km') or get_cell(row, 'reactance')
+                dia = get_cell(row, 'cable_dia_mm') or get_cell(row, 'cable_dia')
+                xlpe = get_cell(row, 'xlpe')
+                pairs = get_cell(row, 'pairs') or get_cell(row, 'no_of_pairs')
+                paralleled = get_cell(row, 'paralleled') or get_cell(row, 'paralleled_count') or get_cell(row, 'parallels')
+                conductor_material = get_cell(row, 'conductor_material') or get_cell(row, 'material')
+                insulation = get_cell(row, 'insulation') or xlpe
+                sheath = get_cell(row, 'sheath') or get_cell(row, 'armour')
+                formation = get_cell(row, 'formation')
+                grouping_k2 = get_cell(row, 'grouping_k2')
+
+                # Normalize and cast
+                try:
+                    size_val = float(size) if size is not None and str(size).strip() != '' else None
+                except Exception:
+                    size_val = None
+                try:
+                    cores_val = float(cores) if cores is not None and str(cores).strip() != '' else None
+                except Exception:
+                    cores_val = None
+                try:
+                    amp_air_val = float(amp_air) if amp_air is not None and str(amp_air).strip() != '' else None
+                except Exception:
+                    amp_air_val = None
+                try:
+                    amp_ground_val = float(amp_ground) if amp_ground is not None and str(amp_ground).strip() != '' else None
+                except Exception:
+                    amp_ground_val = None
+                try:
+                    res_m = float(res_km) / 1000.0 if res_km is not None and str(res_km).strip() != '' else None
+                except Exception:
+                    res_m = None
+                try:
+                    react_m = float(react_km) / 1000.0 if react_km is not None and str(react_km).strip() != '' else None
+                except Exception:
+                    react_m = None
+                try:
+                    dia_val = float(dia) if dia is not None and str(dia).strip() != '' else None
+                except Exception:
+                    dia_val = None
+
+                entry = {
+                    'size_mm2': size_val,
+                    'cores': int(cores_val) if cores_val is not None else None,
+                    'ampacity_air': amp_air_val,
+                    'ampacity_ground': amp_ground_val,
+                    'resistance_per_m': res_m,
+                    'reactance_per_m': react_m,
+                    'cable_dia_mm': dia_val,
+                    'xlpe': str(xlpe).strip() if xlpe is not None else None,
+                    'grouping_k2': float(grouping_k2) if grouping_k2 is not None and str(grouping_k2).strip() != '' else None,
+                    'pairs': int(pairs) if pairs is not None and str(pairs).strip() != '' else None,
+                    'paralleled_count': int(paralleled) if paralleled is not None and str(paralleled).strip() != '' else None,
+                    'conductor_material': str(conductor_material).strip() if conductor_material is not None else None,
+                    'insulation': str(insulation).strip() if insulation is not None else None,
+                    'sheath': str(sheath).strip() if sheath is not None else None,
+                    'formation': str(formation).strip() if formation is not None else None,
+                }
+                catalog.append(entry)
             except (ValueError, IndexError, TypeError) as e:
                 errors.append(f"Row {row_idx}: {str(e)}")
-        # Sort ascending by ampacity
-        catalog = sorted(catalog, key=lambda x: x.get('ampacity', 0))
+
+        # Sort by size then ampacity
+        catalog = sorted(catalog, key=lambda x: (x.get('size_mm2') or 0, x.get('ampacity_air') or 0))
         return catalog, errors
     except Exception as e:
         errors.append(f"Error: {str(e)}")
@@ -581,16 +770,24 @@ INMEM_CABLE_RESULTS: Dict[str, Dict[str, Any]] = {}
 
 # Default catalog (IEC-like)
 DEFAULT_CATALOG = [
-    { 'ampacity': 10, 'size_mm2': 1.5 },
-    { 'ampacity': 16, 'size_mm2': 2.5 },
-    { 'ampacity': 25, 'size_mm2': 4 },
-    { 'ampacity': 35, 'size_mm2': 6 },
-    { 'ampacity': 50, 'size_mm2': 10 },
-    { 'ampacity': 63, 'size_mm2': 16 },
-    { 'ampacity': 80, 'size_mm2': 25 },
-    { 'ampacity': 100, 'size_mm2': 35 },
-    { 'ampacity': 125, 'size_mm2': 50 },
-    { 'ampacity': 160, 'size_mm2': 70 },
+    { 'size_mm2': 1.5, 'cores': 3, 'formation': '3C', 'ampacity_air': 10, 'ampacity_ground': 12, 'resistance_per_m': 0.0121, 'reactance_per_m': 0.00011, 'cable_dia_mm': 4.5 },
+    { 'size_mm2': 2.5, 'cores': 3, 'formation': '3C', 'ampacity_air': 16, 'ampacity_ground': 18, 'resistance_per_m': 0.00741, 'reactance_per_m': 0.00009, 'cable_dia_mm': 5.0 },
+    { 'size_mm2': 4, 'cores': 3, 'formation': '3C', 'ampacity_air': 25, 'ampacity_ground': 27, 'resistance_per_m': 0.00461, 'reactance_per_m': 0.00008, 'cable_dia_mm': 6.0 },
+    { 'size_mm2': 6, 'cores': 3, 'formation': '3C', 'ampacity_air': 35, 'ampacity_ground': 37, 'resistance_per_m': 0.00308, 'reactance_per_m': 0.000075, 'cable_dia_mm': 7.0 },
+    { 'size_mm2': 10, 'cores': 3, 'formation': '3C', 'ampacity_air': 50, 'ampacity_ground': 55, 'resistance_per_m': 0.00183, 'reactance_per_m': 0.000065, 'cable_dia_mm': 9.0 },
+    { 'size_mm2': 16, 'cores': 3, 'formation': '3C', 'ampacity_air': 63, 'ampacity_ground': 67, 'resistance_per_m': 0.00115, 'reactance_per_m': 0.000058, 'cable_dia_mm': 10.5 },
+    { 'size_mm2': 25, 'cores': 3, 'formation': '3C', 'ampacity_air': 80, 'ampacity_ground': 85, 'resistance_per_m': 0.000727, 'reactance_per_m': 0.000052, 'cable_dia_mm': 12.0 },
+    { 'size_mm2': 35, 'cores': 3, 'formation': '3C', 'ampacity_air': 100, 'ampacity_ground': 104, 'resistance_per_m': 0.000524, 'reactance_per_m': 0.000047, 'cable_dia_mm': 14.0 },
+    { 'size_mm2': 50, 'cores': 3, 'formation': '3C', 'ampacity_air': 125, 'ampacity_ground': 130, 'resistance_per_m': 0.000387, 'reactance_per_m': 0.000042, 'cable_dia_mm': 16.0 },
+    { 'size_mm2': 70, 'cores': 3, 'formation': '3C', 'ampacity_air': 160, 'ampacity_ground': 165, 'resistance_per_m': 0.000268, 'reactance_per_m': 0.000038, 'cable_dia_mm': 18.0 },
+    { 'size_mm2': 95, 'cores': 3, 'formation': '3C', 'ampacity_air': 200, 'ampacity_ground': 205, 'resistance_per_m': 0.000193, 'reactance_per_m': 0.000035, 'cable_dia_mm': 21.0 },
+    { 'size_mm2': 120, 'cores': 3, 'formation': '3C', 'ampacity_air': 250, 'ampacity_ground': 255, 'resistance_per_m': 0.000153, 'reactance_per_m': 0.000033, 'cable_dia_mm': 23.0 },
+    { 'size_mm2': 150, 'cores': 3, 'formation': '3C', 'ampacity_air': 315, 'ampacity_ground': 320, 'resistance_per_m': 0.000124, 'reactance_per_m': 0.00003, 'cable_dia_mm': 27.0 },
+    { 'size_mm2': 185, 'cores': 3, 'formation': '3C', 'ampacity_air': 350, 'ampacity_ground': 355, 'resistance_per_m': 0.000101, 'reactance_per_m': 0.000028, 'cable_dia_mm': 30.0 },
+    { 'size_mm2': 240, 'cores': 3, 'formation': '3C', 'ampacity_air': 400, 'ampacity_ground': 405, 'resistance_per_m': 0.000075, 'reactance_per_m': 0.000025, 'cable_dia_mm': 34.0 },
+    # Some single-core entries often used for paralleled runs
+    { 'size_mm2': 185, 'cores': 1, 'formation': '1C', 'ampacity_air': 271, 'ampacity_ground': 305, 'resistance_per_m': 0.00021, 'reactance_per_m': 0.000072, 'cable_dia_mm': 36.0 },
+    { 'size_mm2': 240, 'cores': 1, 'formation': '1C', 'ampacity_air': 448, 'ampacity_ground': 385, 'resistance_per_m': 0.00018, 'reactance_per_m': 0.0000719, 'cable_dia_mm': 44.0 },
 ]
 
 
@@ -702,9 +899,11 @@ async def calculate_single_cable(cable: CableInput, catalog_name: Optional[str] 
             grouping = max(0.55, grouping * 0.95)
             temp_factor = round(max(0.85, temp_factor * 0.95), 3)
         derated = apply_derating(flc, grouping_factor=grouping, temp_factor=temp_factor, installation_factor=installation_factor)
-        selected_size_str, size_value, ampacity, resistance_per_m = select_cable_size(derated, catalog_name=catalog_name)
-        vdrop = calculate_voltage_drop(flc, cable.length, cable.voltage, resistance=resistance_per_m, size_mm2=size_value, runs=cable.runs)
-        od = calculate_cable_od(3, size_value)
+        selected_size_str, size_value, ampacity, resistance_per_m, recommended_runs, recommended_cores = select_cable_size(derated, standard=standard, catalog_name=catalog_name, grouping=grouping, temp_factor=temp_factor)
+        # Use recommended runs for voltage drop calculation if present, else the user-specified runs
+        use_runs = recommended_runs if recommended_runs and recommended_runs > 0 else (cable.runs or 1)
+        vdrop = calculate_voltage_drop(flc, cable.length, cable.voltage, resistance=resistance_per_m, size_mm2=size_value, runs=use_runs)
+        od = calculate_cable_od(recommended_cores or 3, size_value)
         
         # Voltage drop limits per standard
         vd_limit = 5.0
@@ -723,17 +922,61 @@ async def calculate_single_cable(cable: CableInput, catalog_name: Optional[str] 
             sc_pass = adi >= float(cable.prospective_sc)
         ampacity_margin = None
         ampacity_margin_pct = None
-        if ampacity is not None:
+        ampacity_base = None
+        ampacity_corrected = None
+        # if catalog_name provided and size matches an entry, compute base/corrected ampacity
+        if catalog_name:
+            # try to find matching catalog entry by size
+            catalog_list = None
+            if DB_USABLE:
+                db = SessionLocal()
+                try:
+                    try:
+                        row = db.query(CatalogModel).filter(CatalogModel.name == catalog_name).first()
+                        if row and row.payload:
+                            catalog_list = row.payload
+                    except OperationalError:
+                        catalog_list = CATALOG_STORE.get(catalog_name)
+                finally:
+                    db.close()
+            else:
+                catalog_list = CATALOG_STORE.get(catalog_name)
+
+            if catalog_list:
+                for entry in catalog_list:
+                    if entry.get('size_mm2') and float(entry.get('size_mm2')) == float(size_value):
+                        base_amp, corrected_amp, _ = compute_ampacity_from_entry(entry, standard=standard, grouping_factor=grouping, temp_factor=temp_factor)
+                        ampacity_base = base_amp
+                        ampacity_corrected = corrected_amp
+                        break
+        # fallback: use ampacity returned by select_cable_size
+        if ampacity is not None and ampacity_base is None:
             try:
                 ampacity_val = float(ampacity)
-                ampacity_margin = round(ampacity_val - derated, 2)
-                ampacity_margin_pct = round(((ampacity_val - derated) / ampacity_val) * 100, 2) if ampacity_val != 0 else None
+                ampacity_base = ampacity_val
+                ampacity_corrected = ampacity_val
             except Exception:
                 ampacity_val = None
+
+        if ampacity_corrected is not None:
+            try:
+                ampacity_margin = round(float(ampacity_corrected) - derated, 2)
+                ampacity_margin_pct = round(((float(ampacity_corrected) - derated) / float(ampacity_corrected)) * 100, 2) if float(ampacity_corrected) != 0 else None
+            except Exception:
+                pass
 
         ao = False
         if ampacity is not None and ampacity_margin is not None:
             ao = (ampacity_margin >= 0) and vd_pass and sc_pass
+        # Build formulas metadata
+        formulas = {
+            'flc': 'I = P / (√3 × V × PF × η)',
+            'derated': 'I_d = I / (grouping_factor × temp_factor × installation_factor)',
+            'runs': 'runs = ceil(I_d / ampacity_corrected_of_one_conductor)',
+            'vd': 'Vd% = (√3 × I_per_run × L × √(R^2 + X^2)) / V × 100',
+            'adiabatic': 'I_adiabatic = K × sqrt(S / t)',
+            'ampacity_correction': 'I_corr = I_base × grouping_factor × temp_factor × installation_factor'
+        }
 
         return CableResult(
             id=cable.cable_number,
@@ -744,12 +987,14 @@ async def calculate_single_cable(cable: CableInput, catalog_name: Optional[str] 
             selected_size=size_value,
             voltage_drop=round(vdrop, 2),
             sc_check=sc_pass,
-            grouping_factor=0.8,
+            grouping_factor=grouping,
             status="pending",
-            cores=3,
+            cores=recommended_cores or cable.cores or 3,
             od=od
             ,
             ampacity=ampacity if ampacity is not None else None,
+            ampacity_base=ampacity_base,
+            ampacity_corrected=ampacity_corrected,
             ampacity_margin=ampacity_margin,
             ampacity_margin_pct=ampacity_margin_pct,
             vd_limit=vd_limit,
@@ -759,6 +1004,14 @@ async def calculate_single_cable(cable: CableInput, catalog_name: Optional[str] 
             ,
             prospective_sc=cable.prospective_sc,
             standard=standard
+            ,
+            standard_ref = ('IEC 60287' if (standard and standard.lower().startswith('iec')) else ('IS 1554' if (standard and standard.lower().startswith('is')) else standard)),
+            recommended_cores=recommended_cores,
+            recommended_runs=recommended_runs,
+            resistance_per_m=resistance_per_m,
+            reactance_per_m=None,
+            configuration=selected_size_str,
+            formulas=formulas
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -900,9 +1153,9 @@ async def download_catalog_template():
     """Return a small XLSX template for catalog upload with headers and example rows."""
     wb = Workbook()
     ws = wb.active
-    ws.append(['size_mm2', 'ampacity'])
-    ws.append([10, 55])
-    ws.append([16, 70])
+    ws.append(['size_mm2', 'ampacity', 'cores', 'ampacity_air', 'ampacity_ground', 'resistance_ohm_per_km', 'reactance_ohm_per_km', 'cable_dia_mm', 'xlpe', 'pairs', 'paralleled_count', 'conductor_material', 'insulation', 'sheath', 'formation'])
+    ws.append([10, 55, 3, 55, 60, 1.83, 0.08, 20, 'XLPE', None, None, 'Cu', 'XLPE', 'PVC', '3C'])
+    ws.append([16, 70, 3, 70, 75, 1.15, 0.07, 22, 'XLPE', None, None, 'Cu', 'XLPE', 'PVC', '3C'])
     bio = io.BytesIO()
     wb.save(bio)
     bio.seek(0)
@@ -919,13 +1172,13 @@ async def download_import_template():
     ws = wb.active
     headers = [
         'cable_number', 'description', 'load_kw', 'load_kva', 'voltage', 'pf', 'efficiency',
-        'length', 'runs', 'cable_type', 'from_equipment', 'to_equipment', 'breaker_type',
-        'feeder_type', 'cores', 'quantity', 'voltage_variation', 'power_supply', 'installation',
+        'length', 'cable_type', 'from_equipment', 'to_equipment', 'breaker_type',
+        'feeder_type', 'quantity', 'voltage_variation', 'power_supply', 'installation',
         'prospective_sc', 'phase_type', 'ambient_temp'
     ]
     ws.append(headers)
     # sample row
-    ws.append(['C-001', 'Sample Motor', 55, 60, 415, 0.9, 0.95, 120, 1, 'C', 'E1', 'E2', 'MCC', 'FDR', 3, 1, None, '3ph', '30'])
+    ws.append(['C-001', 'Sample Motor', 55, 60, 415, 0.9, 0.95, 120, 'C', 'E1', 'E2', 'MCC', 'FDR', 1, None, '3ph', '30'])
     bio = io.BytesIO()
     wb.save(bio)
     bio.seek(0)
